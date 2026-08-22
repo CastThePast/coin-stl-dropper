@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="210mm" height="297mm" viewBox="0 0 210 297">
+  <rect x="0" y="0" width="210" height="297" fill="white"/>
+  <text x="105" y="22" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="6" font-weight="bold">DRAW YOUR COIN</text>
+  <text x="105" y="31" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="3.5">Use a fat black pen. Draw inside the middle circle and/or in the outer ring.</text>
+  <!-- 110 mm outer diameter. Inner ratio exactly matches 35/48, so 80.2083 mm. -->
+  <circle cx="105" cy="149" r="55" fill="none" stroke="black" stroke-width="0.45"/>
+  <circle cx="105" cy="149" r="40.10417" fill="none" stroke="black" stroke-width="0.45"/>
+  <text x="105" y="215" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="3.5">Keep lines bold and simple. Filled black shapes are fine.</text>
+  <text x="105" y="223" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="3.1">Centre drawing → raised on clay. Outer ring drawing → indented on clay.</text>
+  <text x="18" y="278" font-family="Arial, Helvetica, sans-serif" font-size="3">Name:</text>
+  <line x1="31" y1="277" x2="92" y2="277" stroke="black" stroke-width="0.35"/>
+</svg>
