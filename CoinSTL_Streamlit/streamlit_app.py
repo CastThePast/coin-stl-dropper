@@ -54,6 +54,7 @@ def reset_results() -> None:
 
 st.title("🪙 Coin STL Dropper")
 st.caption("Children's drawings → 3D-printable PLA press discs → clay coins")
+st.caption("Engine v3 • maximum-quality STL generation is the default")
 
 st.markdown(
     """
@@ -88,6 +89,16 @@ anonymise = st.checkbox(
     help="Turn this on if filenames contain children's names. Outputs will be drawing_001.stl, drawing_002.stl, etc.",
 )
 
+mirror_for_stamp = st.checkbox(
+    "Mirror the PLA stamp so the clay result matches the child's drawing",
+    value=True,
+    help=(
+        "Recommended for stamping. A stamp face has to be mirrored, just like a rubber stamp, "
+        "so the impression in clay comes out the same way round as the original drawing. "
+        "Turn this off only if you want the printed PLA surface itself to look the same way round."
+    ),
+)
+
 with st.expander("Advanced print settings"):
     c1, c2 = st.columns(2)
     with c1:
@@ -98,6 +109,16 @@ with st.expander("Advanced print settings"):
         line_width = st.number_input("Minimum line width (mm)", 0.5, 3.0, 1.2, 0.1)
         engrave = st.number_input("Centre recess depth (mm)", 0.2, 2.0, 0.8, 0.1)
         emboss = st.number_input("Outer-ring raise height (mm)", 0.2, 2.0, 0.8, 0.1)
+    quality = st.selectbox(
+        "STL quality",
+        ["Maximum quality (default)", "High / faster", "Standard / smaller files"],
+        index=0,
+        help=(
+            "Maximum quality is now the default. It uses a 2048 px working image and a denser "
+            "192 × 768 mesh so curves are smoother. Leave this at Maximum for normal workshop use."
+        ),
+    )
+    st.caption("Maximum quality is the normal default — you do not need to change this for a class batch.")
 
 if uploaded_files:
     st.info(f"{len(uploaded_files)} file{'s' if len(uploaded_files) != 1 else ''} ready to process.")
@@ -109,6 +130,14 @@ if st.button(
     disabled=not uploaded_files,
 ):
     reset_results()
+    if quality == "Standard / smaller files":
+        output_pixels, radial_rings, angular_segments = 1024, 96, 320
+    elif quality == "High / faster":
+        output_pixels, radial_rings, angular_segments = 1536, 128, 512
+    else:
+        # Maximum quality is intentionally the default.
+        output_pixels, radial_rings, angular_segments = 2048, 192, 768
+
     settings = CoinSettings(
         disc_diameter_mm=float(diameter),
         disc_thickness_mm=float(thickness),
@@ -116,6 +145,10 @@ if st.button(
         min_line_width_mm=float(line_width),
         centre_engrave_depth_mm=float(engrave),
         outer_emboss_height_mm=float(emboss),
+        output_pixels=output_pixels,
+        mesh_radial_rings=radial_rings,
+        mesh_angular_segments=angular_segments,
+        mirror_for_stamp=bool(mirror_for_stamp),
     )
 
     # Validate before writing anything.
@@ -203,7 +236,7 @@ if "result_zip" in st.session_state:
     checks = st.session_state.get("result_checks", [])
     if checks:
         with st.expander("Quick visual check of interpreted drawings"):
-            st.caption("Blue = centre-zone recess in PLA. Green = outer-ring raised detail in PLA.")
+            st.caption("Blue = centre-zone recess in PLA. Green = outer-ring raised detail in PLA. This check image stays the same way round as the child's drawing; the STL is mirrored separately when the stamping option is on.")
             for name, image_bytes in checks:
                 st.image(image_bytes, caption=name, use_container_width=True)
 

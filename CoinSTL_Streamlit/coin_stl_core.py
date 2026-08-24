@@ -36,12 +36,16 @@ class CoinSettings:
     centre_engrave_depth_mm: float = 0.8
     outer_emboss_height_mm: float = 0.8
     edge_bevel_mm: float = 0.4
-    guide_erase_halfwidth_mm: float = 0.45
+    guide_erase_halfwidth_mm: float = 0.60
     outer_feature_margin_mm: float = 0.8
     base_chamfer_mm: float = 0.45
-    output_pixels: int = 1024
-    mesh_radial_rings: int = 96
-    mesh_angular_segments: int = 320
+    # Default to the highest practical quality for classroom batches.
+    # At 48 mm this gives sub-0.2 mm mesh spacing around the outside edge,
+    # finer than the useful XY detail of a typical 0.4 mm-nozzle FDM print.
+    output_pixels: int = 2048
+    mesh_radial_rings: int = 192
+    mesh_angular_segments: int = 768
+    mirror_for_stamp: bool = True
     remove_noise_below_mm2: float = 0.08
     make_diagnostic_png: bool = True
 
@@ -225,10 +229,10 @@ def detect_guide_circles(img: np.ndarray, expected_ratio: float) -> GuideDetecti
         perim = cv2.arcLength(c, True)
         if perim < 0.55 * 2 * math.pi * r:
             continue
-        # Eliminate tiny filled blobs masquerading as ellipses.
-        area = abs(cv2.contourArea(c))
-        if area < 0.08 * math.pi * r * r:
-            continue
+        # Do not reject thin outline circles by contour area: a photographed pencil/
+        # printed ring can have a very small signed contour area even when it spans
+        # almost a full ellipse.  Size, axis ratio, perimeter and concentric pairing
+        # below are safer discriminators than filled area here.
         candidates.append(e)
 
     # Deduplicate nearly identical contour edges from the same printed circle.
@@ -263,7 +267,7 @@ def detect_guide_circles(img: np.ndarray, expected_ratio: float) -> GuideDetecti
                 continue
             icx, icy = inner[0]
             cd = math.hypot(icx - ocx, icy - ocy) / ro
-            if cd > 0.085:
+            if cd > 0.12:
                 continue
             ar_diff = abs(_ellipse_axis_ratio(inner) - _ellipse_axis_ratio(outer))
             center_page = math.hypot(ocx - page_cx, ocy - page_cy) / max(short, 1)
@@ -337,17 +341,25 @@ def detect_guide_circles(img: np.ndarray, expected_ratio: float) -> GuideDetecti
 # ---------------------------- mask construction ----------------------------
 
 def _ellipse_affine_to_circle(ellipse, N: int, target_radius_px: float) -> np.ndarray:
-    """Affine transform mapping a fitted outer ellipse to a centred circle."""
+    """Affine transform mapping a fitted ellipse to a centred circle without rotating the drawing.
+
+    Scale along the ellipse's own principal axes, but keep those axes pointing in
+    the same directions on the page.  The previous implementation aligned an
+    ellipse axis to screen-X, which could rotate a child's drawing by an arbitrary
+    amount depending on the fitted ellipse angle.
+    """
     (cx, cy), (ew, eh), angle_deg = ellipse
     th = math.radians(angle_deg)
-    # cv2.fitEllipse: width-axis follows `angle`; perpendicular axis follows +90 degrees.
-    p0 = np.array([cx, cy], dtype=np.float32)
-    p1 = p0 + np.array([0.5 * ew * math.cos(th), 0.5 * ew * math.sin(th)], dtype=np.float32)
-    p2 = p0 + np.array([-0.5 * eh * math.sin(th), 0.5 * eh * math.cos(th)], dtype=np.float32)
-    C = N / 2.0
-    dst = np.array([[C, C], [C + target_radius_px, C], [C, C + target_radius_px]], dtype=np.float32)
-    src = np.vstack([p0, p1, p2]).astype(np.float32)
-    return cv2.getAffineTransform(src, dst)
+    u = np.array([math.cos(th), math.sin(th)], dtype=np.float64)
+    v = np.array([-math.sin(th), math.cos(th)], dtype=np.float64)
+    a = max(0.5 * ew, 1e-6)
+    b = max(0.5 * eh, 1e-6)
+    # Symmetric anisotropic scale: no reflection and no arbitrary global rotation.
+    A = (target_radius_px / a) * np.outer(u, u) + (target_radius_px / b) * np.outer(v, v)
+    centre = np.array([cx, cy], dtype=np.float64)
+    target = np.array([N / 2.0, N / 2.0], dtype=np.float64)
+    t = target - A @ centre
+    return np.hstack([A, t[:, None]]).astype(np.float32)
 
 
 def _transform_point(M: np.ndarray, p: Tuple[float, float]) -> np.ndarray:
@@ -398,9 +410,9 @@ def _radial_remap(mask: np.ndarray, src_inner_ratio: float, dst_inner_ratio: flo
     scale[nz] = rsn[nz] / rn[nz]
     mapx = C + dx * scale
     mapy = C + dy * scale
-    remapped = cv2.remap(mask.astype(np.uint8), mapx, mapy, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    remapped = cv2.remap(mask.astype(np.float32), mapx, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     remapped[rn > 1.0] = 0
-    return remapped.astype(bool)
+    return remapped >= 0.5
 
 
 def _ensure_minimum_width(mask: np.ndarray, width_px: int) -> np.ndarray:
@@ -416,6 +428,44 @@ def _ensure_minimum_width(mask: np.ndarray, width_px: int) -> np.ndarray:
         k = max(1, int(round(width_px / 4)))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1))
         return cv2.dilate(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+
+
+def _smooth_mask_boundary(mask: np.ndarray, sigma_px: float) -> np.ndarray:
+    """Gently anti-alias raster stair-steps without changing the child's design materially.
+
+    This is deliberately applied only after minimum-width expansion, so it cannot
+    erase a printable stroke. The physical smoothing radius is tiny (about 0.08 mm).
+    """
+    if sigma_px <= 0.5 or not mask.any():
+        return mask
+    blurred = cv2.GaussianBlur(
+        mask.astype(np.float32), (0, 0),
+        sigmaX=float(sigma_px), sigmaY=float(sigma_px),
+        borderType=cv2.BORDER_REPLICATE,
+    )
+    return blurred >= 0.5
+
+
+def _transformed_ellipse_guide_mask(M: np.ndarray, ellipse, N: int, thickness_px: int) -> np.ndarray:
+    """Rasterise a detected guide ellipse after the image affine transform.
+
+    This is more reliable than erasing only an ideal concentric radial band when a
+    phone photo or a hand-drawn/printed guide is slightly off-centre.
+    """
+    (cx, cy), (ew, eh), angle_deg = ellipse
+    th = math.radians(angle_deg)
+    ct, st = math.cos(th), math.sin(th)
+    t = np.linspace(0.0, 2.0 * np.pi, 1440, endpoint=False, dtype=np.float64)
+    ux = 0.5 * ew * np.cos(t)
+    uy = 0.5 * eh * np.sin(t)
+    x = cx + ct * ux - st * uy
+    y = cy + st * ux + ct * uy
+    pts = np.column_stack([x, y, np.ones_like(x)])
+    q = pts @ M.T
+    q = np.rint(q).astype(np.int32).reshape((-1, 1, 2))
+    out = np.zeros((N, N), dtype=np.uint8)
+    cv2.polylines(out, [q], True, 255, thickness=max(1, int(thickness_px)), lineType=cv2.LINE_AA)
+    return out.astype(bool)
 
 
 def build_design_masks(img: np.ndarray, detection: GuideDetection, settings: CoinSettings):
@@ -437,6 +487,16 @@ def build_design_masks(img: np.ndarray, detection: GuideDetection, settings: Coi
     _, ink = cv2.threshold(norm, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     ink = ink.astype(bool)
 
+    # The supplied classroom template uses blue guide circles and children are asked
+    # to draw in black.  Explicitly ignore blue/cyan guide ink (including anti-aliased
+    # edges).  Geometry-based guide removal below remains as a fallback for monochrome
+    # scans and older templates.
+    hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
+    blue_guide = (hsv[:, :, 0] >= 85) & (hsv[:, :, 0] <= 145) & (hsv[:, :, 1] >= 45)
+    if blue_guide.any():
+        blue_guide = cv2.dilate(blue_guide.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1).astype(bool)
+        ink[blue_guide] = False
+
     centre_out = np.array([N / 2.0, N / 2.0], dtype=np.float64)
     src_inner_px = _transformed_ellipse_radius(M, detection.inner_ellipse, centre_out)
     src_inner_ratio = float(np.clip(src_inner_px / Rpx, 0.50, 0.92))
@@ -447,9 +507,16 @@ def build_design_masks(img: np.ndarray, detection: GuideDetection, settings: Coi
     guide_half = settings.guide_erase_halfwidth_mm * px_per_mm
     src_inner = src_inner_ratio * Rpx
 
-    # The printed guides are black too; explicitly strip narrow bands around them.
+    # The printed guides are ink too.  Remove both (a) generous ideal radial bands and
+    # (b) the actually detected inner/outer guide curves after transformation.  The
+    # second part matters for slightly skewed phone photos and imperfect circles.
     guide_band = (np.abs(rr - src_inner) <= guide_half) | (np.abs(rr - Rpx) <= guide_half)
-    ink[guide_band] = False
+    curve_thickness = max(3, int(round(2.0 * guide_half)))
+    detected_guides = (
+        _transformed_ellipse_guide_mask(M, detection.inner_ellipse, N, curve_thickness)
+        | _transformed_ellipse_guide_mask(M, detection.outer_ellipse, N, curve_thickness)
+    )
+    ink[guide_band | detected_guides] = False
 
     centre_mask = ink & (rr < (src_inner - guide_half))
     outer_mask = ink & (rr > (src_inner + guide_half)) & (rr < (Rpx - settings.outer_feature_margin_mm * px_per_mm))
@@ -479,7 +546,13 @@ def build_design_masks(img: np.ndarray, detection: GuideDetection, settings: Coi
     centre_mask = _ensure_minimum_width(centre_mask, min_width_px)
     outer_mask = _ensure_minimum_width(outer_mask, min_width_px)
 
-    # Re-clip after thickening so the outer rim remains structurally clean.
+    # Smooth sub-pixel/raster stair-steps introduced by thresholding and thickening.
+    # Keep this very small in physical units so hand-drawn character is preserved.
+    edge_smooth_px = max(0.8, 0.08 * px_per_mm)
+    centre_mask = _smooth_mask_boundary(centre_mask, edge_smooth_px)
+    outer_mask = _smooth_mask_boundary(outer_mask, edge_smooth_px)
+
+    # Re-clip after thickening/smoothing so the outer rim remains structurally clean.
     centre_mask &= rr_out < (dst_inner_px - 0.20 * px_per_mm)
     outer_mask &= rr_out > (dst_inner_px + 0.20 * px_per_mm)
     outer_mask &= rr_out < (Rpx - settings.outer_feature_margin_mm * px_per_mm)
@@ -518,7 +591,9 @@ def _sample_height_polar(heightmap: np.ndarray, Rpx: float, Rmm: float, nr: int,
     x = rr * np.cos(tt)
     y = rr * np.sin(tt)
     mapx = C + (x / Rmm) * Rpx
-    mapy = C + (y / Rmm) * Rpx
+    # Image rows increase downward, while Cartesian Y increases upward.
+    # Subtract here so an unmirrored STL matches the source when viewed from +Z.
+    mapy = C - (y / Rmm) * Rpx
     z = cv2.remap(heightmap, mapx.astype(np.float32), mapy.astype(np.float32), cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
     return x, y, z
 
@@ -683,7 +758,12 @@ def process_one(path: Path, output_dir: Path, settings: CoinSettings, progress: 
         if not centre_mask.any() and not outer_mask.any():
             raise ValueError("No black drawing was found inside either design zone after removing the guide circles.")
 
-        heightmap = build_heightmap(centre_mask, outer_mask, settings, px_per_mm)
+        # A physical stamp must be mirrored so the clay impression reads the same way
+        # as the child's drawing.  Make this explicit instead of relying on image/mesh
+        # coordinate conventions.  Diagnostics stay unmirrored for easy comparison.
+        mesh_centre = np.fliplr(centre_mask) if settings.mirror_for_stamp else centre_mask
+        mesh_outer = np.fliplr(outer_mask) if settings.mirror_for_stamp else outer_mask
+        heightmap = build_heightmap(mesh_centre, mesh_outer, settings, px_per_mm)
         progress(f"Building watertight mesh for {path.name}")
         vertices, faces = build_watertight_mesh(heightmap, Rpx, settings)
 
