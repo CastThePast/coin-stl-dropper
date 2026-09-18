@@ -1,28 +1,52 @@
-# Coin STL Dropper — Streamlit edition
+# Coin STL Dropper — Streamlit v4 (Direct Sand)
 
-A small browser app that converts children's two-zone coin drawings into watertight STL press discs.
+Batch-converts photographed/scanned pupil coin drawings into **3D-printable reeded PLA coin masters** for the Cast the Past direct-sand workflow.
 
-## Deploy on Streamlit Community Cloud
+## Canonical v4 workflow
 
-1. Create a GitHub repository.
-2. Upload every file in this folder, including the `.streamlit` folder.
-3. Go to `https://share.streamlit.io` and sign in with GitHub.
-4. Choose **Create app** → **Yup, I have an app**.
-5. Select your repository, branch `main`, and entrypoint `streamlit_app.py`.
-6. Deploy.
+The clay intermediary has been removed.
 
-## Conversion rules
+1. Put the printed PLA coin master on a desk or individual plastic tray.
+2. Place a **stainless catering ring** around it.
+3. Fill with moulding sand and tamp firmly.
+4. Flip the ring/tray assembly over.
+5. Remove the PLA master from the underside.
+6. Slide the catering ring containing the sand mould onto the larger heatproof casting tray.
+7. Adult presenter pours molten low-melt alloy / pewter.
+8. Cool, release and compare with the original design.
 
-- Drawing inside inner guide circle → recessed/concave on PLA → raised on clay.
-- Drawing in outer ring → raised/convex on PLA → indented on clay.
+## v4 STL rules
 
-## Default geometry
+- round coin / medallion only
+- standard **simple reeded vertical edge on every master**
+- no meander and no edge-style selector
+- no printed outer hoop/collar — the real day-of collar is the stainless catering ring
+- vertical sides
+- centre-zone drawing is **raised on PLA** and therefore raised on the finished metal coin
+- outer design-band drawing is **recessed on PLA** and therefore recessed on the finished metal coin
+- optional blind reverse extraction socket for sprung tweezers
+- mirroring is **off by default** for the normal flip/remove/direct-sand sequence
 
-- 48 mm disc diameter
-- 3 mm disc thickness
-- 35 mm inner design diameter
-- 1.2 mm minimum printable line width
-- 0.8 mm centre recess
-- 0.8 mm outer-ring raise
+## Template
 
-The app processes all uploaded files in one batch; there is no fixed class-size count.
+The supplied A4 template uses two blue guide circles and black pupil drawing.
+
+- **Inside the inner circle** → raised detail on the PLA / finished metal coin
+- **Between the circles** → recessed detail on the PLA / finished metal coin
+
+Use a bold black pen. Filled black shapes are supported.
+
+## Run locally
+
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+## Streamlit Community Cloud
+
+For the existing CastThePast/coin-stl-dropper repository, keep the app in `CoinSTL_Streamlit/` and use `CoinSTL_Streamlit/streamlit_app.py` as the Streamlit entrypoint. Replace files inside that existing folder, not at the repository root. The current package keeps the same dependencies as v3.
+
+## Physical test note
+
+The rear extraction socket is a prototype feature. Default: 5 mm diameter × 1.4 mm deep. Test it with the actual sprung tweezers and adjust only if required. It is a blind hole and must not break through to the design face.

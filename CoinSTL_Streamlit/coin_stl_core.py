@@ -33,19 +33,41 @@ class CoinSettings:
     disc_thickness_mm: float = 3.0
     inner_design_diameter_mm: float = 35.0
     min_line_width_mm: float = 1.2
-    centre_engrave_depth_mm: float = 0.8
-    outer_emboss_height_mm: float = 0.8
+
+    # Canonical direct-sand workflow (v4): the finished metal coin reproduces the
+    # PLA master's relief.  Centre-zone drawing is therefore raised on the PLA;
+    # outer design-band drawing is recessed.
+    centre_raise_height_mm: float = 0.8
+    outer_engrave_depth_mm: float = 0.8
     edge_bevel_mm: float = 0.4
     guide_erase_halfwidth_mm: float = 0.60
     outer_feature_margin_mm: float = 0.8
-    base_chamfer_mm: float = 0.45
+
+    # Every pupil master uses the same simple vertical reeding.  No edge-style
+    # choice is exposed in the app.  Grooves are cut inward so the requested
+    # disc diameter remains the maximum outside diameter.
+    reed_count: int = 96
+    reed_depth_mm: float = 0.35
+    reed_blend_width_mm: float = 0.8
+
+    # Prototype reverse extraction socket for sprung tweezers.  It is deliberately
+    # blind: it must never break through to the designed face.
+    include_extraction_hole: bool = True
+    extraction_hole_diameter_mm: float = 5.0
+    extraction_hole_depth_mm: float = 1.4
+
+    # Vertical sides are preferred for the direct sand master; no base chamfer.
+    base_chamfer_mm: float = 0.0
+
     # Default to the highest practical quality for classroom batches.
-    # At 48 mm this gives sub-0.2 mm mesh spacing around the outside edge,
-    # finer than the useful XY detail of a typical 0.4 mm-nozzle FDM print.
     output_pixels: int = 2048
     mesh_radial_rings: int = 192
     mesh_angular_segments: int = 768
-    mirror_for_stamp: bool = True
+
+    # Direct sand casting with the flip/remove/flip handling sequence should not
+    # require rubber-stamp mirroring.  Leave False unless a physical test proves
+    # a particular workflow needs it.
+    mirror_master: bool = False
     remove_noise_below_mm2: float = 0.08
     make_diagnostic_png: bool = True
 
@@ -56,10 +78,22 @@ class CoinSettings:
             raise ValueError("Disc thickness must be positive.")
         if not 0 < self.inner_design_diameter_mm < self.disc_diameter_mm:
             raise ValueError("Inner design diameter must be between 0 and disc diameter.")
-        if self.centre_engrave_depth_mm <= 0 or self.centre_engrave_depth_mm >= self.disc_thickness_mm:
-            raise ValueError("Centre engraving depth must be positive and less than disc thickness.")
-        if self.outer_emboss_height_mm < 0:
-            raise ValueError("Outer emboss height cannot be negative.")
+        if self.centre_raise_height_mm < 0:
+            raise ValueError("Centre raise height cannot be negative.")
+        if self.outer_engrave_depth_mm <= 0 or self.outer_engrave_depth_mm >= self.disc_thickness_mm:
+            raise ValueError("Outer-band engraving depth must be positive and less than disc thickness.")
+        if self.reed_count < 24:
+            raise ValueError("Reed count is too low for the standard edge.")
+        if self.reed_depth_mm < 0 or self.reed_depth_mm >= self.disc_diameter_mm * 0.05:
+            raise ValueError("Reed depth is outside a sensible range.")
+        if self.include_extraction_hole:
+            if not 2.0 <= self.extraction_hole_diameter_mm <= 10.0:
+                raise ValueError("Extraction-hole diameter should be between 2 and 10 mm.")
+            if not 0.5 <= self.extraction_hole_depth_mm < self.disc_thickness_mm:
+                raise ValueError("Extraction-hole depth must be at least 0.5 mm and less than disc thickness.")
+            # Hole is central, where the direct-sand master is never engraved down.
+            if self.disc_thickness_mm - self.extraction_hole_depth_mm < 0.8:
+                raise ValueError("Leave at least 0.8 mm of material above the extraction hole.")
         if self.output_pixels < 512:
             raise ValueError("Output pixel resolution should be at least 512.")
         if self.mesh_radial_rings < 24 or self.mesh_angular_segments < 96:
@@ -568,6 +602,11 @@ def _smoothstep01(x: np.ndarray) -> np.ndarray:
 
 
 def build_heightmap(centre_mask: np.ndarray, outer_mask: np.ndarray, settings: CoinSettings, px_per_mm: float) -> np.ndarray:
+    """Build the direct-sand PLA-master face.
+
+    With the clay intermediary removed, the final metal cast reproduces the PLA
+    master's relief.  Centre-zone drawing is raised; outer-band drawing is recessed.
+    """
     bevel_px = max(1.0, settings.edge_bevel_mm * px_per_mm)
     dc = cv2.distanceTransform(centre_mask.astype(np.uint8), cv2.DIST_L2, 5)
     do = cv2.distanceTransform(outer_mask.astype(np.uint8), cv2.DIST_L2, 5)
@@ -575,8 +614,8 @@ def build_heightmap(centre_mask: np.ndarray, outer_mask: np.ndarray, settings: C
     ao = _smoothstep01(do / bevel_px)
     return (
         settings.disc_thickness_mm
-        - settings.centre_engrave_depth_mm * ac
-        + settings.outer_emboss_height_mm * ao
+        + settings.centre_raise_height_mm * ac
+        - settings.outer_engrave_depth_mm * ao
     ).astype(np.float32)
 
 
@@ -598,11 +637,33 @@ def _sample_height_polar(heightmap: np.ndarray, Rpx: float, Rmm: float, nr: int,
     return x, y, z
 
 
+def _reeded_radius(theta: np.ndarray, R: float, settings: CoinSettings) -> np.ndarray:
+    """Maximum radius stays R; simple rounded grooves are cut inward."""
+    if settings.reed_count <= 0 or settings.reed_depth_mm <= 1e-9:
+        return np.full_like(theta, R, dtype=np.float64)
+    wave = 0.5 * (1.0 + np.cos(settings.reed_count * theta))
+    return R - settings.reed_depth_mm * wave
+
+
 def build_watertight_mesh(heightmap: np.ndarray, Rpx: float, settings: CoinSettings):
+    """Build a watertight direct-sand master with reeded side and optional blind rear socket."""
     R = settings.disc_diameter_mm / 2.0
     nr = settings.mesh_radial_rings
     nt = settings.mesh_angular_segments
-    x, y, z = _sample_height_polar(heightmap, Rpx, R, nr, nt)
+    x0, y0, z = _sample_height_polar(heightmap, Rpx, R, nr, nt)
+
+    # Apply the standard reeding only near the physical edge.  The design is sampled
+    # on the ideal circular face first, then the outer geometry is gently pulled
+    # inward to create vertical reeds without changing the maximum diameter.
+    rr0 = np.sqrt(x0 * x0 + y0 * y0)
+    tt0 = np.arctan2(y0, x0)
+    blend_w = max(settings.reed_blend_width_mm, settings.reed_depth_mm * 1.5, 0.35)
+    edge_blend = np.clip((rr0 - (R - blend_w)) / blend_w, 0.0, 1.0)
+    edge_blend = edge_blend * edge_blend * (3.0 - 2.0 * edge_blend)
+    wave = 0.5 * (1.0 + np.cos(settings.reed_count * tt0))
+    rr = rr0 - settings.reed_depth_mm * wave * edge_blend
+    x = rr * np.cos(tt0)
+    y = rr * np.sin(tt0)
 
     vertices: List[Tuple[float, float, float]] = []
     faces: List[Tuple[int, int, int]] = []
@@ -618,10 +679,8 @@ def build_watertight_mesh(heightmap: np.ndarray, Rpx: float, settings: CoinSetti
     def top_idx(j, i):
         return top_start + j * nt + (i % nt)
 
-    # Centre fan, CCW when viewed from above.
     for i in range(nt):
         faces.append((top_center, top_idx(0, i), top_idx(0, i + 1)))
-    # Annular top quads.
     for j in range(nr - 1):
         for i in range(nt):
             a = top_idx(j, i)
@@ -631,59 +690,74 @@ def build_watertight_mesh(heightmap: np.ndarray, Rpx: float, settings: CoinSetti
             faces.append((a, b, c))
             faces.append((a, c, d))
 
-    chamfer = max(0.0, min(settings.base_chamfer_mm, R * 0.25, settings.disc_thickness_mm * 0.45))
-    Rb = R - chamfer if chamfer > 1e-6 else R
-
-    # Flat bottom uses only a centre fan (no need for thousands of coplanar rings).
-    bottom_center = len(vertices)
-    vertices.append((0.0, 0.0, 0.0))
-    bottom_start = len(vertices)
-    theta = np.linspace(0.0, 2.0 * np.pi, nt, endpoint=False)
-    for t in theta:
-        vertices.append((Rb * math.cos(t), Rb * math.sin(t), 0.0))
-
-    def bot_idx(i):
-        return bottom_start + (i % nt)
-
-    # Clockwise when viewed from above => outward normal is -Z.
-    for i in range(nt):
-        faces.append((bottom_center, bot_idx(i + 1), bot_idx(i)))
-
+    theta = np.linspace(0.0, 2.0 * np.pi, nt, endpoint=False, dtype=np.float64)
+    outer_r = _reeded_radius(theta, R, settings)
     top_outer = [top_idx(nr - 1, i) for i in range(nt)]
 
-    if chamfer > 1e-6:
-        mid_start = len(vertices)
+    # Bottom outer ring uses exactly the same reeded radius as the top perimeter,
+    # producing vertical side reeds (no printed decorative hoop and no meander).
+    bottom_outer_start = len(vertices)
+    for r, t in zip(outer_r, theta):
+        vertices.append((float(r * math.cos(t)), float(r * math.sin(t)), 0.0))
+
+    def bo(i):
+        return bottom_outer_start + (i % nt)
+
+    # Vertical outer wall.
+    for i in range(nt):
+        a = top_outer[i]
+        b = top_outer[(i + 1) % nt]
+        c = bo(i + 1)
+        d = bo(i)
+        faces.append((a, c, b))
+        faces.append((a, d, c))
+
+    if settings.include_extraction_hole:
+        rh = settings.extraction_hole_diameter_mm / 2.0
+        hd = settings.extraction_hole_depth_mm
+        # Bottom inner ring around the hole.
+        inner_bottom_start = len(vertices)
         for t in theta:
-            vertices.append((R * math.cos(t), R * math.sin(t), chamfer))
+            vertices.append((float(rh * math.cos(t)), float(rh * math.sin(t)), 0.0))
 
-        def mid_idx(i):
-            return mid_start + (i % nt)
+        def ib(i):
+            return inner_bottom_start + (i % nt)
 
-        # Vertical wall from chamfer height to top perimeter.
+        # Annular bottom, normals downward.
         for i in range(nt):
-            a = top_outer[i]
-            b = top_outer[(i + 1) % nt]
-            c = mid_idx(i + 1)
-            d = mid_idx(i)
+            a = bo(i)
+            b = bo(i + 1)
+            c = ib(i + 1)
+            d = ib(i)
             faces.append((a, c, b))
             faces.append((a, d, c))
-        # Sloped base chamfer.
+
+        # Inner cylindrical wall rises into the coin; normals point into the socket.
+        inner_top_start = len(vertices)
+        for t in theta:
+            vertices.append((float(rh * math.cos(t)), float(rh * math.sin(t)), float(hd)))
+
+        def it(i):
+            return inner_top_start + (i % nt)
+
         for i in range(nt):
-            a = mid_idx(i)
-            b = mid_idx(i + 1)
-            c = bot_idx(i + 1)
-            d = bot_idx(i)
-            faces.append((a, c, b))
-            faces.append((a, d, c))
+            a = it(i)
+            b = it(i + 1)
+            c = ib(i + 1)
+            d = ib(i)
+            faces.append((a, b, c))
+            faces.append((a, c, d))
+
+        # Blind-hole ceiling, normals downward into the cavity.
+        cap_center = len(vertices)
+        vertices.append((0.0, 0.0, float(hd)))
+        for i in range(nt):
+            faces.append((cap_center, it(i + 1), it(i)))
     else:
-        # Straight side wall.
+        bottom_center = len(vertices)
+        vertices.append((0.0, 0.0, 0.0))
         for i in range(nt):
-            a = top_outer[i]
-            b = top_outer[(i + 1) % nt]
-            c = bot_idx(i + 1)
-            d = bot_idx(i)
-            faces.append((a, c, b))
-            faces.append((a, d, c))
+            faces.append((bottom_center, bo(i + 1), bo(i)))
 
     return np.asarray(vertices, dtype=np.float32), np.asarray(faces, dtype=np.int32)
 
@@ -758,11 +832,11 @@ def process_one(path: Path, output_dir: Path, settings: CoinSettings, progress: 
         if not centre_mask.any() and not outer_mask.any():
             raise ValueError("No black drawing was found inside either design zone after removing the guide circles.")
 
-        # A physical stamp must be mirrored so the clay impression reads the same way
-        # as the child's drawing.  Make this explicit instead of relying on image/mesh
-        # coordinate conventions.  Diagnostics stay unmirrored for easy comparison.
-        mesh_centre = np.fliplr(centre_mask) if settings.mirror_for_stamp else centre_mask
-        mesh_outer = np.fliplr(outer_mask) if settings.mirror_for_stamp else outer_mask
+        # Canonical direct-sand workflow: no rubber-stamp mirroring is needed for the
+        # normal flip/remove/cast sequence.  An override remains available only for
+        # physical testing or an unusual workflow.  Diagnostics stay unmirrored.
+        mesh_centre = np.fliplr(centre_mask) if settings.mirror_master else centre_mask
+        mesh_outer = np.fliplr(outer_mask) if settings.mirror_master else outer_mask
         heightmap = build_heightmap(mesh_centre, mesh_outer, settings, px_per_mm)
         progress(f"Building watertight mesh for {path.name}")
         vertices, faces = build_watertight_mesh(heightmap, Rpx, settings)

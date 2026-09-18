@@ -17,7 +17,6 @@ st.set_page_config(
     layout="centered",
 )
 
-
 ALLOWED_TYPES = ["png", "jpg", "jpeg", "bmp", "tif", "tiff", "pdf"]
 
 
@@ -53,16 +52,23 @@ def reset_results() -> None:
 
 
 st.title("🪙 Coin STL Dropper")
-st.caption("Children's drawings → 3D-printable PLA press discs → clay coins")
-st.caption("Engine v3 • maximum-quality STL generation is the default")
+st.caption("Children's drawings → reeded PLA coin masters → direct sand moulds → cast coins")
+st.caption("Engine v4 • no clay stage • maximum-quality STL generation by default")
 
 st.markdown(
     """
-Upload a whole class at once. The app will use the two printed guide circles to interpret each drawing:
+Upload a whole class at once. The two blue guide circles define two **face-design zones**:
 
-- **Inside the inner circle:** recessed in the PLA → **raised on the clay**
-- **In the ring between the circles:** raised on the PLA → **indented in the clay**
+- **Inside the inner circle:** raised on the PLA master → **raised on the finished metal coin**
+- **In the band between the circles:** recessed on the PLA master → **recessed on the finished metal coin**
+
+Every STL now gets the same **simple reeded vertical edge automatically**. There is no edge-style selector and no clay intermediary.
 """
+)
+
+st.info(
+    "Direct-sand workflow: PLA coin on tray → stainless catering ring around it → add sand → tamp → flip → "
+    "remove PLA master → slide ring/mould to the casting tray → adult pour."
 )
 
 with open(Path(__file__).with_name("coin_template_A4.svg"), "rb") as f:
@@ -89,53 +95,59 @@ anonymise = st.checkbox(
     help="Turn this on if filenames contain children's names. Outputs will be drawing_001.stl, drawing_002.stl, etc.",
 )
 
-mirror_for_stamp = st.checkbox(
-    "Mirror the PLA stamp so the clay result matches the child's drawing",
-    value=True,
-    help=(
-        "Recommended for stamping. A stamp face has to be mirrored, just like a rubber stamp, "
-        "so the impression in clay comes out the same way round as the original drawing. "
-        "Turn this off only if you want the printed PLA surface itself to look the same way round."
-    ),
-)
-
 with st.expander("Advanced print settings"):
     c1, c2 = st.columns(2)
     with c1:
-        diameter = st.number_input("Disc diameter (mm)", 30.0, 80.0, 48.0, 1.0)
-        thickness = st.number_input("Disc thickness (mm)", 1.5, 8.0, 3.0, 0.1)
+        diameter = st.number_input("Coin diameter (mm)", 30.0, 80.0, 48.0, 1.0)
+        thickness = st.number_input("Master thickness (mm)", 1.5, 8.0, 3.0, 0.1)
         inner = st.number_input("Inner design diameter (mm)", 20.0, 60.0, 35.0, 0.5)
-    with c2:
         line_width = st.number_input("Minimum line width (mm)", 0.5, 3.0, 1.2, 0.1)
-        engrave = st.number_input("Centre recess depth (mm)", 0.2, 2.0, 0.8, 0.1)
-        emboss = st.number_input("Outer-ring raise height (mm)", 0.2, 2.0, 0.8, 0.1)
+    with c2:
+        centre_raise = st.number_input("Centre raise height (mm)", 0.2, 2.0, 0.8, 0.1)
+        outer_engrave = st.number_input("Outer-band recess depth (mm)", 0.2, 2.0, 0.8, 0.1)
+        extraction_hole = st.checkbox(
+            "Include reverse extraction socket",
+            value=True,
+            help="Prototype blind hole for pinched sprung tweezers. It does not pass through the coin face.",
+        )
+        hole_diameter = st.number_input("Extraction socket diameter (mm)", 2.0, 10.0, 5.0, 0.5, disabled=not extraction_hole)
+        hole_depth = st.number_input("Extraction socket depth (mm)", 0.5, 3.0, 1.4, 0.1, disabled=not extraction_hole)
+
+    mirror_master = st.checkbox(
+        "Mirror the PLA master left/right (normally OFF)",
+        value=False,
+        help=(
+            "The normal direct-sand flip/remove/cast workflow should preserve the child's orientation, so leave this off. "
+            "Use only if a physical test shows your particular handling sequence needs mirroring."
+        ),
+    )
+
     quality = st.selectbox(
         "STL quality",
         ["Maximum quality (default)", "High / faster", "Standard / smaller files"],
         index=0,
         help=(
-            "Maximum quality is now the default. It uses a 2048 px working image and a denser "
-            "192 × 768 mesh so curves are smoother. Leave this at Maximum for normal workshop use."
+            "Maximum quality uses a 2048 px working image and a dense 192 × 768 mesh. "
+            "This is also dense enough to reproduce the standard reeded edge cleanly."
         ),
     )
-    st.caption("Maximum quality is the normal default — you do not need to change this for a class batch.")
+    st.caption("Simple reeding is applied automatically to every coin edge; there is no edge-style choice.")
 
 if uploaded_files:
     st.info(f"{len(uploaded_files)} file{'s' if len(uploaded_files) != 1 else ''} ready to process.")
 
 if st.button(
-    "MAKE STL FILES",
+    "MAKE REEDED COIN STL FILES",
     type="primary",
     use_container_width=True,
     disabled=not uploaded_files,
 ):
     reset_results()
     if quality == "Standard / smaller files":
-        output_pixels, radial_rings, angular_segments = 1024, 96, 320
+        output_pixels, radial_rings, angular_segments = 1024, 96, 384
     elif quality == "High / faster":
-        output_pixels, radial_rings, angular_segments = 1536, 128, 512
+        output_pixels, radial_rings, angular_segments = 1536, 128, 576
     else:
-        # Maximum quality is intentionally the default.
         output_pixels, radial_rings, angular_segments = 2048, 192, 768
 
     settings = CoinSettings(
@@ -143,15 +155,17 @@ if st.button(
         disc_thickness_mm=float(thickness),
         inner_design_diameter_mm=float(inner),
         min_line_width_mm=float(line_width),
-        centre_engrave_depth_mm=float(engrave),
-        outer_emboss_height_mm=float(emboss),
+        centre_raise_height_mm=float(centre_raise),
+        outer_engrave_depth_mm=float(outer_engrave),
+        include_extraction_hole=bool(extraction_hole),
+        extraction_hole_diameter_mm=float(hole_diameter),
+        extraction_hole_depth_mm=float(hole_depth),
         output_pixels=output_pixels,
         mesh_radial_rings=radial_rings,
         mesh_angular_segments=angular_segments,
-        mirror_for_stamp=bool(mirror_for_stamp),
+        mirror_master=bool(mirror_master),
     )
 
-    # Validate before writing anything.
     try:
         settings.validate()
     except Exception as exc:
@@ -183,8 +197,8 @@ if st.button(
             path.write_bytes(uploaded.getvalue())
             input_paths.append(path)
 
-        # process_batch emits several status lines per file. Count only the [x/n] lines for progress.
         total = len(input_paths)
+
         def progress(message: str) -> None:
             status_box.caption(message)
             if message.startswith("[") and "/" in message:
@@ -197,8 +211,6 @@ if st.button(
         results = process_batch(input_paths, output_dir, settings, progress=progress)
         progress_bar.progress(1.0, text="Finished")
 
-        # Keep only compact result data in session memory; temporary processing files are removed
-        # automatically when this block exits.
         checks = []
         for result in results:
             if result.success and result.diagnostic_file:
@@ -215,14 +227,14 @@ if st.button(
 if "result_zip" in st.session_state:
     ok, total, failures = st.session_state.result_summary
     if ok == total:
-        st.success(f"Done — {ok}/{total} STL files created successfully.")
+        st.success(f"Done — {ok}/{total} reeded coin STL files created successfully.")
     else:
         st.warning(f"Created {ok}/{total} STL files. {total - ok} file(s) need attention.")
 
     st.download_button(
         "DOWNLOAD ALL STLs + CHECK IMAGES (.ZIP)",
         data=st.session_state.result_zip,
-        file_name="Coin_STL_Output.zip",
+        file_name="Coin_STL_Output_v4_Direct_Sand.zip",
         mime="application/zip",
         type="primary",
         use_container_width=True,
@@ -236,7 +248,11 @@ if "result_zip" in st.session_state:
     checks = st.session_state.get("result_checks", [])
     if checks:
         with st.expander("Quick visual check of interpreted drawings"):
-            st.caption("Blue = centre-zone recess in PLA. Green = outer-ring raised detail in PLA. This check image stays the same way round as the child's drawing; the STL is mirrored separately when the stamping option is on.")
+            st.caption(
+                "Blue = centre-zone drawing (raised on PLA / raised on metal). "
+                "Green = outer design band (recessed on PLA / recessed on metal). "
+                "The reeded side edge is added automatically and is not shown in this top-view check image."
+            )
             for name, image_bytes in checks:
                 st.image(image_bytes, caption=name, use_container_width=True)
 
