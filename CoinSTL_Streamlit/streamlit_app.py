@@ -8,6 +8,7 @@ from pathlib import Path
 
 import streamlit as st
 
+import coin_stl_core as core
 from coin_stl_core import CoinSettings, process_batch
 
 
@@ -53,7 +54,14 @@ def reset_results() -> None:
 
 st.title("🪙 Coin STL Dropper")
 st.caption("Children's drawings → reeded PLA coin masters → direct sand moulds → cast coins")
-st.caption("Engine v4.1 • blue-guide detection • no clay stage • maximum-quality STL generation by default")
+engine_version = getattr(core, "ENGINE_VERSION", "older version")
+st.caption(f"Engine v{engine_version} • fitted guide boundaries • maximum-quality STL generation by default")
+if engine_version != "4.2":
+    st.error("The conversion engine is out of date. Replace coin_stl_core.py alongside streamlit_app.py, then reboot the app.")
+    st.stop()
+if st.session_state.get("engine_version") != engine_version:
+    reset_results()
+    st.session_state["engine_version"] = engine_version
 
 st.markdown(
     """

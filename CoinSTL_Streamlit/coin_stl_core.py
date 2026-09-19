@@ -24,6 +24,8 @@ except Exception:  # pragma: no cover
     dilation = disk = skeletonize = None
 
 
+ENGINE_VERSION = "4.2"
+
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".pdf"}
 
 
@@ -259,7 +261,7 @@ def _detect_blue_guides(img: np.ndarray, expected_ratio: float):
             ri, ro = _ellipse_equiv_radius(inner), _ellipse_equiv_radius(outer)
             ratio = ri / ro
             offset = np.linalg.norm(np.array(inner[0]) - outer[0]) / ro
-            if not 0.54 <= ratio <= 0.90 or offset > 0.04:
+            if not 0.54 <= ratio <= 0.90 or offset > 0.08:
                 continue
             score = abs(ratio - expected_ratio) + offset + err_i + err_o
             if best is None or score < best.score:
@@ -438,7 +440,7 @@ def _ellipse_affine_to_circle(ellipse, N: int, target_radius_px: float) -> np.nd
     # Symmetric anisotropic scale: no reflection and no arbitrary global rotation.
     A = (target_radius_px / a) * np.outer(u, u) + (target_radius_px / b) * np.outer(v, v)
     centre = np.array([cx, cy], dtype=np.float64)
-    target = np.array([N / 2.0, N / 2.0], dtype=np.float64)
+    target = np.array([(N - 1) / 2.0, (N - 1) / 2.0], dtype=np.float64)
     t = target - A @ centre
     return np.hstack([A, t[:, None]]).astype(np.float32)
 
@@ -456,6 +458,33 @@ def _transformed_ellipse_radius(M: np.ndarray, ellipse, centre_out: np.ndarray) 
     q1 = _transform_point(M, p1)
     q2 = _transform_point(M, p2)
     return float((np.linalg.norm(q1 - centre_out) + np.linalg.norm(q2 - centre_out)) / 2.0)
+
+
+def _inner_boundary_radii(M: np.ndarray, ellipse, N: int) -> np.ndarray:
+    """Intersect each output-centred ray with the actual fitted inner ellipse."""
+    (cx, cy), (ew, eh), angle = ellipse
+    th = math.radians(angle)
+    rotation = np.array([[math.cos(th), -math.sin(th)],
+                         [math.sin(th), math.cos(th)]])
+    axes = M[:, :2] @ rotation @ np.diag([ew / 2, eh / 2])
+    inv_axes = np.linalg.inv(axes)
+    centre = _transform_point(M, (cx, cy))
+    C = (N - 1) / 2.0
+    yy, xx = np.indices((N, N), dtype=np.float32)
+    dx, dy = xx - C, yy - C
+    norm = np.maximum(np.hypot(dx, dy), 1e-9)
+    ux, uy = dx / norm, dy / norm
+    ux[norm < 1] = 1.0
+    uy[norm < 1] = 0.0
+    q = inv_axes @ (np.array([C, C]) - centre)
+    vx = inv_axes[0, 0] * ux + inv_axes[0, 1] * uy
+    vy = inv_axes[1, 0] * ux + inv_axes[1, 1] * uy
+    a = vx * vx + vy * vy
+    b = 2 * (q[0] * vx + q[1] * vy)
+    c = float(q @ q - 1)
+    if c >= 0:
+        raise ValueError("Guide circles are misaligned. Please take a straight-on photo with both blue circles visible.")
+    return (-b + np.sqrt(np.maximum(b*b - 4*a*c, 0))) / (2*a)
 
 
 def _remove_small_components(mask: np.ndarray, min_area_px: int) -> np.ndarray:
@@ -479,12 +508,13 @@ def _radial_remap(mask: np.ndarray, src_inner_ratio: float, dst_inner_ratio: flo
     ro = np.sqrt(dx * dx + dy * dy)
     rn = ro / max(Rpx, 1e-6)
 
-    rsn = np.empty_like(rn)
-    inside = rn <= dst_inner_ratio
-    rsn[inside] = rn[inside] * (src_inner_ratio / max(dst_inner_ratio, 1e-6))
-    outer = ~inside
-    rsn[outer] = src_inner_ratio + (rn[outer] - dst_inner_ratio) * (
-        (1.0 - src_inner_ratio) / max(1.0 - dst_inner_ratio, 1e-6)
+    # src_inner_ratio may vary with direction: a photographed inner ellipse
+    # need not become a concentric circle after correcting the outer ellipse.
+    rsn = np.where(
+        rn <= dst_inner_ratio,
+        rn * src_inner_ratio / max(dst_inner_ratio, 1e-6),
+        src_inner_ratio + (rn - dst_inner_ratio) *
+        (1.0 - src_inner_ratio) / max(1.0 - dst_inner_ratio, 1e-6),
     )
     scale = np.ones_like(rn)
     nz = rn > 1e-6
@@ -571,15 +601,17 @@ def build_design_masks(img: np.ndarray, detection: GuideDetection, settings: Coi
     # Remove printed guides by their fitted geometry below. Global colour
     # removal also erases purple underdrawing and tinted black pen strokes.
 
-    centre_out = np.array([N / 2.0, N / 2.0], dtype=np.float64)
-    src_inner_px = _transformed_ellipse_radius(M, detection.inner_ellipse, centre_out)
-    src_inner_ratio = float(np.clip(src_inner_px / Rpx, 0.50, 0.92))
+    # Classify ink using the complete inner ellipse, not its average radius.
+    # Both zones then map to their final radii using the same directional boundary.
+    src_inner = _inner_boundary_radii(M, detection.inner_ellipse, N)
+    src_ratios = src_inner / Rpx
+    if float(src_ratios.min()) < 0.45 or float(src_ratios.max()) > 0.95:
+        raise ValueError("The inner guide could not be aligned reliably. Please photograph both complete blue circles.")
+    src_inner_ratio = float(np.median(src_ratios))
     dst_inner_ratio = settings.inner_design_diameter_mm / settings.disc_diameter_mm
-
     yy, xx = np.indices((N, N), dtype=np.float32)
     rr = np.sqrt((xx - C) ** 2 + (yy - C) ** 2)
     guide_half = settings.guide_erase_halfwidth_mm * px_per_mm
-    src_inner = src_inner_ratio * Rpx
 
     # The printed guides are ink too.  Remove both (a) generous ideal radial bands and
     # (b) the actually detected inner/outer guide curves after transformation.  The
@@ -590,14 +622,31 @@ def build_design_masks(img: np.ndarray, detection: GuideDetection, settings: Coi
         _transformed_ellipse_guide_mask(M, detection.inner_ellipse, N, curve_thickness)
         | _transformed_ellipse_guide_mask(M, detection.outer_ellipse, N, curve_thickness)
     )
+    # Keep connected motifs in their dominant zone. A small tip of a border
+    # zigzag crossing the printed line must not become a separate raised dot.
+    # Remove only coloured guide pixels near the fitted curves for labelling;
+    # preserve dark pen crossings so each motif can be assessed as a whole.
+    hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
+    guide_colour = ((hsv[:, :, 0] >= 90) & (hsv[:, :, 0] <= 125)
+                    & (hsv[:, :, 1] >= 55) & (hsv[:, :, 2] >= 80))
+    motif_ink = ink & ~((guide_band | detected_guides) & guide_colour)
+    count, labels = cv2.connectedComponents(motif_ink.astype(np.uint8))
+    total = np.bincount(labels.ravel(), minlength=count)
+    in_count = np.bincount(labels[rr < src_inner], minlength=count)
+    fraction = in_count / np.maximum(total, 1)
+    allow_centre = fraction[labels] >= 0.20
+    allow_outer = fraction[labels] <= 0.80
+    # Unlabelled pixels can still be classified geometrically after guide removal.
+    allow_centre[labels == 0] = True
+    allow_outer[labels == 0] = True
     ink[guide_band | detected_guides] = False
 
-    centre_mask = ink & (rr < (src_inner - guide_half))
-    outer_mask = ink & (rr > (src_inner + guide_half)) & (rr < (Rpx - settings.outer_feature_margin_mm * px_per_mm))
+    centre_mask = ink & allow_centre & (rr < (src_inner - guide_half))
+    outer_mask = ink & allow_outer & (rr > (src_inner + guide_half)) & (rr < (Rpx - settings.outer_feature_margin_mm * px_per_mm))
 
     # Radially map the detected template boundary to the requested physical inner diameter.
-    centre_mask = _radial_remap(centre_mask, src_inner_ratio, dst_inner_ratio, Rpx)
-    outer_mask = _radial_remap(outer_mask, src_inner_ratio, dst_inner_ratio, Rpx)
+    centre_mask = _radial_remap(centre_mask, src_ratios, dst_inner_ratio, Rpx)
+    outer_mask = _radial_remap(outer_mask, src_ratios, dst_inner_ratio, Rpx)
 
     # Force the two semantic zones after remapping so no accidental overlap can occur.
     rr_out = rr
@@ -839,6 +888,8 @@ def save_diagnostic(path: Path, centre_mask: np.ndarray, outer_mask: np.ndarray,
     inner_r = int(round(Rpx * settings.inner_design_diameter_mm / settings.disc_diameter_mm))
     cv2.circle(canvas, (C, C), outer_r, (40, 40, 40), 2)
     cv2.circle(canvas, (C, C), inner_r, (80, 80, 80), 2)
+    cv2.putText(canvas, f"Engine v{ENGINE_VERSION}", (12, N - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, max(0.45, N / 2400), (70, 70, 70), 1, cv2.LINE_AA)
     ok, encoded = cv2.imencode(".png", canvas)
     if ok:
         encoded.tofile(str(path))
@@ -928,6 +979,7 @@ def write_batch_report(output_dir: Path, results: Sequence[ProcessResult], setti
 
     settings_path = output_dir / "settings_used.txt"
     with open(settings_path, "w", encoding="utf-8") as f:
+        f.write(f"engine_version={ENGINE_VERSION}\n")
         for k, v in asdict(settings).items():
             f.write(f"{k}={v}\n")
 
