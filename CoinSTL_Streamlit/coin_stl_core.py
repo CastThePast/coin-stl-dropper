@@ -227,8 +227,55 @@ def _ellipse_axis_ratio(ellipse) -> float:
     return min(w, h) / max(w, h)
 
 
+def _detect_blue_guides(img: np.ndarray, expected_ratio: float):
+    """Prefer the printed blue guides over dark artwork, including broken arcs."""
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    blue = ((hsv[:, :, 0] >= 90) & (hsv[:, :, 0] <= 125)
+            & (hsv[:, :, 1] >= 55)).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(blue, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    short = min(img.shape[:2])
+    candidates = []
+    for contour in contours:
+        if len(contour) < 80:
+            continue
+        e = cv2.fitEllipse(contour)
+        radius = _ellipse_equiv_radius(e)
+        if not 0.15 * short < radius < 0.65 * short or _ellipse_axis_ratio(e) < 0.65:
+            continue
+        # Reject artwork/blobs: guide pixels must lie close to an ellipse and
+        # cover most directions. A long but short-angle arc is not sufficient.
+        points = contour[:, 0, :].astype(np.float64) - np.array(e[0])
+        a = math.radians(e[2])
+        u = (points[:, 0] * math.cos(a) + points[:, 1] * math.sin(a)) / (e[1][0] / 2)
+        v = (-points[:, 0] * math.sin(a) + points[:, 1] * math.cos(a)) / (e[1][1] / 2)
+        residual = float(np.quantile(np.abs(np.hypot(u, v) - 1), 0.90))
+        bins = np.floor((np.arctan2(v, u) + np.pi) / (2*np.pi) * 36).astype(int) % 36
+        if residual > 0.025 or len(np.unique(bins)) < 24:
+            continue
+        candidates.append((e, residual))
+    best = None
+    for inner, err_i in candidates:
+        for outer, err_o in candidates:
+            ri, ro = _ellipse_equiv_radius(inner), _ellipse_equiv_radius(outer)
+            ratio = ri / ro
+            offset = np.linalg.norm(np.array(inner[0]) - outer[0]) / ro
+            if not 0.54 <= ratio <= 0.90 or offset > 0.04:
+                continue
+            score = abs(ratio - expected_ratio) + offset + err_i + err_o
+            if best is None or score < best.score:
+                best = GuideDetection(
+                    cx=float(outer[0][0]), cy=float(outer[0][1]),
+                    inner_radius=ri, outer_radius=ro,
+                    inner_ellipse=inner, outer_ellipse=outer,
+                    method="blue guide ellipses", score=float(score))
+    return best
+
+
 def detect_guide_circles(img: np.ndarray, expected_ratio: float) -> GuideDetection:
     """Detect the two large concentric printed guide circles as ellipse pairs."""
+    blue_detection = _detect_blue_guides(img, expected_ratio)
+    if blue_detection is not None:
+        return blue_detection
     h0, w0 = img.shape[:2]
     scale = min(1.0, 1400.0 / max(h0, w0))
     work = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else img.copy()
@@ -521,15 +568,8 @@ def build_design_masks(img: np.ndarray, detection: GuideDetection, settings: Coi
     _, ink = cv2.threshold(norm, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     ink = ink.astype(bool)
 
-    # The supplied classroom template uses blue guide circles and children are asked
-    # to draw in black.  Explicitly ignore blue/cyan guide ink (including anti-aliased
-    # edges).  Geometry-based guide removal below remains as a fallback for monochrome
-    # scans and older templates.
-    hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
-    blue_guide = (hsv[:, :, 0] >= 85) & (hsv[:, :, 0] <= 145) & (hsv[:, :, 1] >= 45)
-    if blue_guide.any():
-        blue_guide = cv2.dilate(blue_guide.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1).astype(bool)
-        ink[blue_guide] = False
+    # Remove printed guides by their fitted geometry below. Global colour
+    # removal also erases purple underdrawing and tinted black pen strokes.
 
     centre_out = np.array([N / 2.0, N / 2.0], dtype=np.float64)
     src_inner_px = _transformed_ellipse_radius(M, detection.inner_ellipse, centre_out)

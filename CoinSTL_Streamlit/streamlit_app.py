@@ -53,7 +53,7 @@ def reset_results() -> None:
 
 st.title("🪙 Coin STL Dropper")
 st.caption("Children's drawings → reeded PLA coin masters → direct sand moulds → cast coins")
-st.caption("Engine v4 • no clay stage • maximum-quality STL generation by default")
+st.caption("Engine v4.1 • blue-guide detection • no clay stage • maximum-quality STL generation by default")
 
 st.markdown(
     """

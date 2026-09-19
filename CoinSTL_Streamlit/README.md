@@ -1,4 +1,4 @@
-# Coin STL Dropper — Streamlit v4 (Direct Sand)
+# Coin STL Dropper — Streamlit v4.1 (Direct Sand)
 
 Batch-converts photographed/scanned pupil coin drawings into **3D-printable reeded PLA coin masters** for the Cast the Past direct-sand workflow.
 
@@ -50,3 +50,9 @@ For the existing CastThePast/coin-stl-dropper repository, keep the app in `CoinS
 ## Physical test note
 
 The rear extraction socket is a prototype feature. Default: 5 mm diameter × 1.4 mm deep. Test it with the actual sprung tweezers and adjust only if required. It is a blind hole and must not break through to the design face.
+
+## v4.1 guide detection fix
+
+The app first fits the blue printed guide ellipses, excluding dark artwork from guide detection. Historical template proportions are measured from the photograph and mapped to the selected output dimensions. Monochrome sheets retain the earlier fallback. Reeding and rear extraction socket geometry are unchanged. Tested against the supplied Tom test photo and different synthetic template ratios.
+
+Guide cleanup now follows the detected circle geometry instead of deleting blue/purple pixels throughout the drawing. This preserves coloured underdrawing and tinted dark strokes away from the guides.
